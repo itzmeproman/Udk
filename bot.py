@@ -3,6 +3,9 @@ from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 from database import Database
 from fuzzywuzzy import fuzz
 
+ANILIST_TOKEN = ""
+TOKEN = ""
+
 
 def add_anime(update, context):
     chat_id = update.effective_chat.id
