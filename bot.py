@@ -28,98 +28,65 @@ def add_anime(update, context):
 def get_close_matches(word, possibilities, n=10, cutoff=0.8):
     return [match for match, score in zip(possibilities, fuzz.ratio(word, possibilities)) if score >= cutoff]
 
-def handle_pagination(update, context):
-    """Handles user interaction with pagination buttons."""
-
-    query = update.callback_query
-    query.answer()  # Acknowledge button press
-
-    data = query.data.split(':')
-    action = data[0]
-    page = int(data[1]) if len(data) > 1 else 1
-
-    chat_id = query.message.chat_id
-    message_id = query.message.message_id
-
-    db = Database()
-    anime_name = context.user_data.get('anime_name', '')  # Get the original search term
-
-    anime_names = [anime['name'] for anime in db.anime_collection.find()]
-    close_matches = get_close_matches(anime_name, anime_names)
-
-    MAX_SUGGESTIONS_PER_PAGE = 5
-
-    if action == 'next':
-        page += 1
-    elif action == 'prev':
-        page -= 1
-    else:
-        # Handle button press for a specific suggestion
-        anime_name = data[1]
-        # Perform search with the chosen anime name
-        search_anime(update, context, db)  # Call search_anime with the selected name
-        return
-
-    start_index = (page - 1) * MAX_SUGGESTIONS_PER_PAGE
-    end_index = start_index + MAX_SUGGESTIONS_PER_PAGE
-    current_page_suggestions = close_matches[start_index:end_index]
-
-    # Create keyboard with suggestions and next/prev buttons
-    keyboard = [[telegram.KeyboardButton(text=suggestion)] for suggestion in current_page_suggestions]
-    if page > 1:
-        keyboard.append([telegram.KeyboardButton(text="Prev")])
-    if end_index < len(close_matches):
-        keyboard.append([telegram.KeyboardButton(text="Next")])
-    reply_markup = telegram.InlineKeyboardMarkup(keyboard)
-
-    # Update the message with new suggestions
-    update.callback_query.edit_message_text(
-        text=f"Your spelling might be wrong. Did you mean:\n{'\n'.join(current_page_suggestions)}",
-        reply_markup=reply_markup
-    )
-    
-
-def search_anime(update, context, db):
+def search_anime(update, context):
     anime_name = update.message.text.strip()
 
-    anime_names = [anime['name'] for anime in db.anime_collection.find()]
-    close_matches = get_close_matches(anime_name, anime_names)
+    # Create an Anilist client
+    client = Client(access_token=ANILIST_TOKEN)
 
-    if close_matches:
-        MAX_SUGGESTIONS_PER_PAGE = 5  # Adjust as needed
-        current_page = context.user_data.get('page', 1)  # Use context to store page number
+    try:
+        # Search for anime on Anilist
+        anime_data = client.search(anime_name, type='anime')
+        anime_list = anime_data['data']['Page']['media']
 
-        if len(close_matches) > MAX_SUGGESTIONS_PER_PAGE:
-            # Pagination logic
-            suggestions_text = "\n".join(close_matches[:MAX_SUGGESTIONS_PER_PAGE])
-            reply_text = f"Your spelling might be wrong. Did you mean:\n{suggestions_text}\n"
-            reply_text += "Press 'Next' for more suggestions or select an option above."
+        if anime_list:
+            # Fuzzy match user input with Anilist results
+            anime_titles = [anime['title']['english'] or anime['title']['romaji'] for anime in anime_list]
+            close_matches = get_close_matches(anime_name, anime_titles)
 
-            # Create a ReplyKeyboardMarkup with buttons for suggestions and "Next"
-            keyboard = [[telegram.KeyboardButton(text) for text in close_matches[:MAX_SUGGESTIONS_PER_PAGE]]]
-            keyboard.append([telegram.KeyboardButton(text="Next")])
-            reply_markup = telegram.ReplyKeyboardMarkup(keyboard=keyboard, one_time_keyboard=True, resize_keyboard=True)
+            if len(close_matches) > 1:
+                # Multiple matches, provide suggestions with pagination
+                MAX_SUGGESTIONS_PER_PAGE = 5
+                current_page = context.user_data.get('page', 1)
+                start_index = (current_page - 1) * MAX_SUGGESTIONS_PER_PAGE
+                end_index = min(start_index + MAX_SUGGESTIONS_PER_PAGE, len(close_matches))
+                current_page_suggestions = close_matches[start_index:end_index]
 
-            if current_page == 1:
+                # Create keyboard with suggestions and navigation buttons
+                keyboard = [[telegram.KeyboardButton(text=suggestion)] for suggestion in current_page_suggestions]
+                if current_page > 1:
+                    keyboard.append([telegram.KeyboardButton(text="Prev")])
+                if end_index < len(close_matches):
+                    keyboard.append([telegram.KeyboardButton(text="Next")])
+                reply_markup = telegram.ReplyKeyboardMarkup(keyboard=keyboard, one_time_keyboard=True, resize_keyboard=True)
+
+                # Send message with suggestions and pagination buttons
+                suggestions_text = "\n".join(current_page_suggestions)
+                reply_text = f"Your spelling might be wrong. Did you mean:\n{suggestions_text}"
                 update.message.reply_text(reply_text, reply_markup=reply_markup)
+
+            elif len(close_matches) == 1:
+                # Single match, fetch info from database
+                anime_name = close_matches[0]
+                anime_info = db.get_anime(anime_name)  # Assuming db is accessible here
+                if anime_info:
+                    # Send anime information from database
+                    update.message.reply_text(f"Title: {anime_info['title']}\nInfo: {anime_info['info_link']}")
+                else:
+                    # Anime found on Anilist but not in database
+                    update.message.reply_text("Anime found on Anilist but not in database. Consider adding it.")
             else:
-                # Update message for subsequent pages
-                update.message.edit_text(reply_text, reply_markup=reply_markup)
-            context.user_data['page'] = current_page + 1  # Update page number
-
+                # No matches found
+                update.message.reply_text("No anime found.")
         else:
-            # Show all suggestions if less than maximum per page
-            anime_name = close_matches[0]  # Use the first suggestion
+            # No results from Anilist
+            update.message.reply_text("No anime found on Anilist.")
 
-    # Handle user selection (if any)
-    if update.callback_query:  # Check for callback query from button press
-        chosen_anime_name = update.callback_query.data  # Get the button text
-        context.user_data['chosen_anime'] = chosen_anime_name  # Store chosen anime name
-        update.callback_query.answer()  # Acknowledge button press
+    except Exception as e:
+        # Handle exceptions (e.g., API errors, no results)
+        update.message.reply_text(f"An error occurred: {str(e)}")
 
-    # Search for the anime (use chosen_anime_name if available)
-    chosen_anime_name = context.user_data.get('chosen_anime', anime_name)
-    anime = db.get_anime(chosen_anime_name)
+
 def start(update, context):
     update.message.reply_text("I'm an anime info bot! Send me an anime name to get its info link.")
 
